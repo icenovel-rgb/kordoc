@@ -4,13 +4,13 @@
 >
 > **원본**: [chrisryugj/kordoc](https://github.com/chrisryugj/kordoc) (MIT) — 아래 문서의 파싱·생성·비교 핵심 전부가 원작자의 작업입니다. 원본 README는 그대로 둡니다.
 >
-> **이 포크(icenovel-rgb)의 추가 기여** — `src/hwpx/generator.ts` 한정:
+> **이 포크의 추가 기능** — `src/hwpx/generator.ts` 한정:
 > - **Markdown 이미지 임베드**: `![alt](src)` → 본문 그림(`hp:pic`/`hc:img`, `imgClip`/`imgDim`=원본 크기), 표 셀 내 이미지
 > - **이미지 크기/배치**: `{width=8cm|%|px}`, 배치 6종(글자처럼·어울림·자리차지·글뒤로·글앞으로·표안)
 > - **디자인 테마**: 본문 행간, 표 머리행 배경색, 셀 행간, `tableStyle="kalbodino"`(좌우 외곽 없는 표·세로 점선·머리/하단 굵은선)
 > - **호환성 수정**: borderFill **1-기반**(id=0 제거 — 한컴에서 채움이 밀리던 문제), 표준 패키지 파일(`version.xml`/`settings.xml`/`container.rdf`/`manifest.xml`) 보강
 >
-> **디자인 원칙 출처(깔보디노 프리셋)**: 서봉국 『(아래아한글로 작성하는) 깔끔한 보고서 디자인 노하우』(유페이퍼) — 디자인 원칙·수치만 참고했으며, 책의 본문·도판·예제는 포함하지 않습니다.
+> **깔보디노 디자인**: 위 `tableStyle="kalbodino"`는 제작자 본인의 보고서 디자인서 『(아래아한글로 작성하는) 깔끔한 보고서 디자인 노하우』(서봉국)의 디자인 원칙을 적용한 것입니다.
 >
 > **연동 스킬**: [icenovel-rgb/kdr](https://github.com/icenovel-rgb/kdr) — 이 포크를 엔진으로 쓰는 한글 보고서 자동 작성 Claude Code 스킬.
 
