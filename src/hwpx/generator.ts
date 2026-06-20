@@ -32,6 +32,7 @@ const CHAR_H3 = 7
 const CHAR_H4 = 8
 const CHAR_TABLE_HEADER = 9
 const CHAR_QUOTE = 10
+const CHAR_TABLE_CELL = 11  // 표 셀 본문 — 본문보다 한 단계 작게(9pt)
 
 const PARA_NORMAL = 0
 const PARA_H1 = 1
@@ -42,9 +43,18 @@ const PARA_CODE = 5
 const PARA_QUOTE = 6
 const PARA_LIST = 7
 const PARA_TABLE_CELL = 8
+const PARA_NORMAL_KEEP = 9  // 본문과 동일하나 keepWithNext=1 — 표/이미지 바로 앞 문단(소제목)이 떨어지지 않게
+const PARA_IMG_CENTER = 10  // 이미지 단락 — 가운데 정렬
+const PARA_HR = 11          // 수평선(---) — 하단 테두리(borderFill 3)로 전폭 선
+const PARA_TC_CENTER = 12   // 표 셀 가운데 정렬(머리행·짧은열)
+const PARA_TABLE_BLOCK = 13 // 표를 감싸는 단락 — 아래 여백으로 다음 내용과 분리(표+텍스트 덩어리 방지)
+// 제목 바로 뒤에 또 제목이 올 때(예: 과제 개요 → 핵심 개발 시스템) 그 사이를 좁히는 tight 변형(위 여백↓)
+const PARA_H2_TIGHT = 14
+const PARA_H3_TIGHT = 15
+const PARA_H4_TIGHT = 16
 // borderFill id는 1-기반이어야 한다(한컴은 1-기반 위치로 해석 — id=0이 있으면 채움/테두리가 한 칸씩 밀림).
 // 고정 borderFill 2개(id 1=무테두리, 2=실선) 다음 id(3)부터 동적 표 테두리 할당.
-const BF_TABLE_BASE = 3
+const BF_TABLE_BASE = 4  // 1=무테두리, 2=실선(4면), 3=HR(하단선) 다음부터 표 셀 테두리 동적 할당
 
 /** 표 셀 테두리/채움 명세 — 위치(머리/본문/끝행 × 좌/중/우)로 결정 */
 interface CellBorderSpec {
@@ -340,7 +350,8 @@ function parseImageWidth(spec?: string): number | undefined {
 }
 
 function parseMarkdownToBlocks(md: string): MdBlock[] {
-  const lines = md.split("\n")
+  // CRLF/CR 정규화 — Windows(\r\n)·구 Mac(\r) 줄바꿈에서도 헤딩·표 등이 정상 인식되게.
+  const lines = md.replace(/\r\n?/g, "\n").split("\n")
   const blocks: MdBlock[] = []
   let i = 0
 
@@ -504,7 +515,9 @@ function generateRuns(text: string, defaultCharPr: number = CHAR_NORMAL): string
   const spans = parseInlineMarkdown(text)
   return spans.map(span => {
     const charId = span.code || span.bold || span.italic ? spanToCharPrId(span) : defaultCharPr
-    return `<hp:run charPrIDRef="${charId}"><hp:t>${escapeXml(span.text)}</hp:t></hp:run>`
+    // <br> 마커 → 강제 줄나눔. 한컴은 <hp:lineBreak/>를 <hp:t> "내부"에 둔다(밖에 두면 무시됨).
+    const inner = escapeXml(span.text).replace(/&lt;br\s*\/?&gt;/gi, "<hp:lineBreak/>")
+    return `<hp:run charPrIDRef="${charId}"><hp:t>${inner}</hp:t></hp:run>`
   }).join("")
 }
 
@@ -609,14 +622,23 @@ function charPr(
 
 // ─── paraPr 생성 헬퍼 ───────────────────────────────
 
-function paraPr(id: number, opts: { align?: string; spaceBefore?: number; spaceAfter?: number; lineSpacing?: number; indent?: number } = {}): string {
-  const { align = "JUSTIFY", spaceBefore = 0, spaceAfter = 0, lineSpacing = 160, indent = 0 } = opts
+function paraPr(id: number, opts: { align?: string; spaceBefore?: number; spaceAfter?: number; lineSpacing?: number; indent?: number; keepWithNext?: boolean; hanging?: number; border?: number } = {}): string {
+  const { align = "JUSTIFY", spaceBefore = 0, spaceAfter = 0, lineSpacing = 160, indent = 0, keepWithNext = false, hanging = 0, border = 1 } = opts
+  // hanging>0이면 내어쓰기: 문단 왼쪽을 hanging만큼 들이고 첫 줄만 그만큼 빼서, 줄바꿈된 줄이 글머리표 뒤 글자 밑에 정렬.
+  const leftMargin = hanging > 0 ? hanging : 0
+  const firstIndent = hanging > 0 ? -hanging : indent
+  // 디자인 룰(서봉국 깔끔한 보고서). ⚠️ 한컴 XML 값 네이밍이 직관과 반대(한글 실측 확인):
+  //  · breakNonLatinWord="BREAK_WORD" = 어절(낱말) 단위 줄나눔 → 한글 단어가 줄 끝에서 안 깨짐(원하는 값).
+  //    ("KEEP_WORD"가 오히려 글자 단위로 낱말을 쪼갬.) breakLatinWord는 영문용이라 "KEEP_WORD"=낱말 유지로 반대.
+  //  · widowOrphan="1" — 외톨이 줄(페이지 끝/처음 1줄 고립) 보호.
+  //  · keepWithNext — 소제목 문단에 적용해 다음 문단과 함께 유지(소제목이 페이지 하단에 홀로 시작 방지).
+  const kwn = keepWithNext ? "1" : "0"
   // 한컴 2024는 margin을 자식 요소(<hc:prev value unit>)로 읽는다. 속성형(prev="...")은 무시되어
   // 문단 간격이 적용되지 않는다. lineSpacing에도 unit이 필요. <hp:switch>로 신/구 형식 모두 제공.
   const marginAndSpacing =
     `<hh:margin>` +
-      `<hc:intent value="${indent}" unit="HWPUNIT"/>` +
-      `<hc:left value="0" unit="HWPUNIT"/>` +
+      `<hc:intent value="${firstIndent}" unit="HWPUNIT"/>` +
+      `<hc:left value="${leftMargin}" unit="HWPUNIT"/>` +
       `<hc:right value="0" unit="HWPUNIT"/>` +
       `<hc:prev value="${spaceBefore}" unit="HWPUNIT"/>` +
       `<hc:next value="${spaceAfter}" unit="HWPUNIT"/>` +
@@ -625,10 +647,10 @@ function paraPr(id: number, opts: { align?: string; spaceBefore?: number; spaceA
   return `      <hh:paraPr id="${id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="AUTO">
         <hh:align horizontal="${align}" vertical="BASELINE"/>
         <hh:heading type="NONE" idRef="0" level="0"/>
-        <hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>
+        <hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="1" keepWithNext="${kwn}" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>
         <hh:autoSpacing eAsianEng="0" eAsianNum="0"/>
         <hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${marginAndSpacing}</hp:case><hp:default>${marginAndSpacing}</hp:default></hp:switch>
-        <hh:border borderFillIDRef="1" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>
+        <hh:border borderFillIDRef="${border}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/>
       </hh:paraPr>`
 }
 
@@ -639,54 +661,54 @@ function generateHeaderXml(theme: ResolvedTheme, tableBorderFills: TableBorderFi
   <hh:refList>
     <hh:fontfaces itemCnt="7">
       <hh:fontface lang="HANGUL" fontCnt="3">
-        <hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="4" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
-        <hh:font id="1" face="함초롬돋움" type="TTF" isEmbedded="0">
+        <hh:font id="1" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="4" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
-        <hh:font id="2" face="HY견고딕" type="TTF" isEmbedded="0">
+        <hh:font id="2" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="9" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="LATIN" fontCnt="3">
-        <hh:font id="0" face="Times New Roman" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_OLDSTYLE" weight="5" proportion="4" contrast="2" strokeVariation="0" armStyle="0" letterform="0" midline="0" xHeight="4"/>
         </hh:font>
-        <hh:font id="1" face="Consolas" type="TTF" isEmbedded="0">
+        <hh:font id="1" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_MODERN" weight="5" proportion="0" contrast="0" strokeVariation="0" armStyle="0" letterform="0" midline="0" xHeight="0"/>
         </hh:font>
-        <hh:font id="2" face="Arial Black" type="TTF" isEmbedded="0">
+        <hh:font id="2" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="9" proportion="0" contrast="0" strokeVariation="0" armStyle="0" letterform="0" midline="0" xHeight="0"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="HANJA" fontCnt="1">
-        <hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="4" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="JAPANESE" fontCnt="1">
-        <hh:font id="0" face="굴림" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="OTHER" fontCnt="1">
-        <hh:font id="0" face="굴림" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="SYMBOL" fontCnt="1">
-        <hh:font id="0" face="Symbol" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
       <hh:fontface lang="USER" fontCnt="1">
-        <hh:font id="0" face="굴림" type="TTF" isEmbedded="0">
+        <hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0">
           <hh:typeInfo familyType="FCAT_GOTHIC" weight="6" proportion="0" contrast="0" strokeVariation="1" armStyle="1" letterform="1" midline="1" xHeight="1"/>
         </hh:font>
       </hh:fontface>
     </hh:fontfaces>
-    <hh:borderFills itemCnt="${2 + tableBorderFills.length}">
+    <hh:borderFills itemCnt="${3 + tableBorderFills.length}">
       <hh:borderFill id="1" threeD="0" shadow="0" centerLine="0" breakCellSeparateLine="0">
         <hh:slash type="NONE" Crooked="0" isCounter="0"/>
         <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
@@ -706,34 +728,53 @@ function generateHeaderXml(theme: ResolvedTheme, tableBorderFills: TableBorderFi
         <hh:bottomBorder type="SOLID" width="0.12 mm" color="#000000"/>
         <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
         <hh:fillInfo/>
+      </hh:borderFill>
+      <hh:borderFill id="3" threeD="0" shadow="0" centerLine="0" breakCellSeparateLine="0">
+        <hh:slash type="NONE" Crooked="0" isCounter="0"/>
+        <hh:backSlash type="NONE" Crooked="0" isCounter="0"/>
+        <hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>
+        <hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>
+        <hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>
+        <hh:bottomBorder type="SOLID" width="0.4 mm" color="#888888"/>
+        <hh:diagonal type="NONE" width="0.1 mm" color="#000000"/>
+        <hh:fillInfo/>
       </hh:borderFill>${tableBorderFills.length ? "\n" + tableBorderFills.map(e => e.xml).join("\n") : ""}
     </hh:borderFills>
-    <hh:charProperties itemCnt="11">
+    <hh:charProperties itemCnt="12">
 ${charPr(0, 1000, false, false, 0, theme.body)}
 ${charPr(1, 1000, true, false, 0, theme.body)}
 ${charPr(2, 1000, false, true, 0, theme.body)}
 ${charPr(3, 1000, true, true, 0, theme.body)}
 ${charPr(4, 900, false, false, 1)}
-${charPr(5, 1800, true, false, 1, theme.h1)}
-${charPr(6, 1400, true, false, 1, theme.h2)}
-${charPr(7, 1200, true, false, 1, theme.h3)}
+${charPr(5, 2000, true, false, 1, theme.h1)}
+${charPr(6, 1500, true, false, 1, theme.h2)}
+${charPr(7, 1250, true, false, 1, theme.h3)}
 ${charPr(8, 1100, true, false, 1, theme.h4)}
-${charPr(CHAR_TABLE_HEADER, 1000, theme.tableHeaderBold, false, 0, theme.tableHeader)}
+${charPr(CHAR_TABLE_HEADER, 900, theme.tableHeaderBold, false, 0, theme.tableHeader)}
 ${charPr(CHAR_QUOTE, 1000, false, true, 0, theme.quote)}
+${charPr(CHAR_TABLE_CELL, 900, false, false, 0, theme.body)}
     </hh:charProperties>
     <hh:tabProperties itemCnt="0"/>
     <hh:numberings itemCnt="0"/>
     <hh:bullets itemCnt="0"/>
-    <hh:paraProperties itemCnt="9">
+    <hh:paraProperties itemCnt="17">
 ${paraPr(0, { lineSpacing: theme.bodyLineSpacing })}
-${paraPr(1, { align: "LEFT", spaceBefore: 2400, spaceAfter: 600, lineSpacing: 180 })}
-${paraPr(2, { align: "LEFT", spaceBefore: 1700, spaceAfter: 400, lineSpacing: 170 })}
-${paraPr(3, { align: "LEFT", spaceBefore: 1200, spaceAfter: 300, lineSpacing: 160 })}
-${paraPr(4, { align: "LEFT", spaceBefore: 900, spaceAfter: 200, lineSpacing: 160 })}
+${paraPr(1, { align: "LEFT", spaceBefore: 3200, spaceAfter: 300, lineSpacing: 160, keepWithNext: true })}
+${paraPr(2, { align: "LEFT", spaceBefore: 2400, spaceAfter: 250, lineSpacing: 160, keepWithNext: true })}
+${paraPr(3, { align: "LEFT", spaceBefore: 1700, spaceAfter: 200, lineSpacing: 160, keepWithNext: true })}
+${paraPr(4, { align: "LEFT", spaceBefore: 1200, spaceAfter: 150, lineSpacing: 160, keepWithNext: true })}
 ${paraPr(5, { align: "LEFT", lineSpacing: 130, indent: 400 })}
-${paraPr(6, { align: "LEFT", lineSpacing: 150, indent: 600 })}
-${paraPr(7, { align: "LEFT", lineSpacing: 160, indent: 600 })}
+${paraPr(6, { align: "LEFT", lineSpacing: 140 })}
+${paraPr(7, { align: "JUSTIFY", lineSpacing: theme.bodyLineSpacing, hanging: 700 })}
 ${paraPr(8, { align: "LEFT", lineSpacing: theme.tableCellLineSpacing })}
+${paraPr(9, { lineSpacing: theme.bodyLineSpacing, keepWithNext: true })}
+${paraPr(10, { align: "CENTER", lineSpacing: theme.bodyLineSpacing, spaceBefore: 400, spaceAfter: 500 })}
+${paraPr(11, { align: "JUSTIFY", lineSpacing: 100, spaceBefore: 300, spaceAfter: 300, border: 3 })}
+${paraPr(12, { align: "CENTER", lineSpacing: theme.tableCellLineSpacing })}
+${paraPr(13, { lineSpacing: 100, spaceBefore: 150, spaceAfter: 900 })}
+${paraPr(14, { align: "LEFT", spaceBefore: 400, spaceAfter: 250, lineSpacing: 160, keepWithNext: true })}
+${paraPr(15, { align: "LEFT", spaceBefore: 350, spaceAfter: 200, lineSpacing: 160, keepWithNext: true })}
+${paraPr(16, { align: "LEFT", spaceBefore: 300, spaceAfter: 150, lineSpacing: 160, keepWithNext: true })}
     </hh:paraProperties>
     <hh:styles itemCnt="1">
       <hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langIDRef="1042" lockForm="0"/>
@@ -775,6 +816,93 @@ const TABLE_ID_BASE = 1000
 let tableIdCounter = TABLE_ID_BASE
 function nextTableId(): number { return ++tableIdCounter }
 
+// 표 글자 기준 폭(9pt): CJK·기호·화살표 등은 1em(900), 라틴/숫자는 약 0.52em.
+const CELL_FONT = 900
+const CELL_PAD = 1150  // 셀 좌우 여백 근사(cellMargin+inMargin+여유) — 머리행 글자가 세로로 안 깨지게
+function isWideChar(c: number): boolean {
+  return (c >= 0x1100 && c <= 0x11FF) || (c >= 0x2E80 && c <= 0x9FFF) ||
+         (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) || (c >= 0xFF00 && c <= 0xFFEF) ||
+         (c >= 0x2190 && c <= 0x21FF) /*화살표*/ || (c >= 0x2460 && c <= 0x24FF) /*①②*/ ||
+         (c >= 0x2600 && c <= 0x27BF) /*★ 등 기호*/ || c === 0x2605 || c === 0x2606
+}
+function strWidth(s: string): number {
+  let w = 0
+  for (const ch of s) w += isWideChar(ch.codePointAt(0) || 0) ? CELL_FONT : Math.round(CELL_FONT * 0.52)
+  return w
+}
+/** 셀 전체 폭(가중치용) */
+function measureCellUnits(text: string): number {
+  const t = (text || "").trim()
+  if (/^!\[[^\]]*\]\([^)]+\)$/.test(t)) return CELL_FONT * 8
+  return strWidth(t)
+}
+/** 셀이 줄 안 깨지려면 최소로 필요한 폭 = 가장 긴 "안 깨지는 토큰"(공백 분리) + 여백 */
+function cellMinWidth(text: string): number {
+  const t = (text || "").trim()
+  if (/^!\[[^\]]*\]\([^)]+\)$/.test(t)) return 8000
+  let m = 0
+  for (const tok of t.split(/\s+/)) if (tok) m = Math.max(m, strWidth(tok))
+  return Math.min(m, 12000) + CELL_PAD   // 토큰이 너무 길면 상한(그 이상은 줄바꿈 허용)
+}
+
+/**
+ * 내용 기반 열 너비 — 각 열의 "1줄에 필요한 폭"(상한 CAP 적용)을 구해,
+ *  · 짧은 라벨 열(문제·순번·기관 등)은 1줄에 맞추고
+ *  · 긴 설명 열이 남는 폭을 비례로 나눠 갖는다.
+ * 합이 표 폭을 넘으면 비례 축소(어느 열도 굶기지 않음). 합은 항상 totalW.
+ */
+function computeColumnWidths(rows: string[][], colCnt: number, totalW: number): number[] {
+  const CAP = 15 * CELL_FONT   // 1줄 보장 상한(약 15글자) — 그 이상 내용은 줄바꿈 전제
+  const minW = 1700
+  const need: number[] = []
+  for (let c = 0; c < colCnt; c++) {
+    let m = 0
+    for (const row of rows) {
+      const cell = (row[c] ?? "").trim()
+      const w = /^!\[[^\]]*\]\([^)]+\)$/.test(cell) ? CELL_FONT * 8 : strWidth(cell)
+      m = Math.max(m, w)
+    }
+    need[c] = Math.min(m, CAP) + CELL_PAD
+  }
+  const sum = need.reduce((a, b) => a + b, 0)
+  let widths: number[]
+  if (sum <= totalW) {
+    // 여유는 상한에 걸린 "긴 설명 열"에 비례 배분(설명 열이 넓어지게). 없으면 전체 비례.
+    const extra = totalW - sum
+    const longw = need.map(n => (n >= CAP + CELL_PAD ? n : 0))
+    const sl = longw.reduce((a, b) => a + b, 0)
+    widths = sl > 0
+      ? need.map((n, i) => n + Math.floor(extra * longw[i] / sl))
+      : need.map(n => n + Math.floor(extra * n / sum))
+  } else {
+    // 부족: 비례 축소(minW 보장)
+    const f = totalW / sum
+    widths = need.map(n => Math.max(minW, Math.floor(n * f)))
+  }
+  // 잔여 오차는 가장 넓은 열에서 흡수(합 = totalW 보장)
+  const diff = totalW - widths.reduce((a, b) => a + b, 0)
+  if (diff !== 0) widths[widths.indexOf(Math.max(...widths))] += diff
+  return widths
+}
+
+/**
+ * 짧은/범주 열인지 — 그런 열의 데이터 셀은 가운데 정렬(순번·중요도·시점·기관명 등).
+ * 숫자·기호·짧은 라벨(≤10자)은 중앙, 서술형(긴 문장) 열은 왼쪽 유지.
+ */
+function isColumnCenterable(rows: string[][], c: number): boolean {
+  if (rows.length < 2) return false
+  let any = false
+  for (let r = 1; r < rows.length; r++) {
+    const v = (rows[r][c] ?? "").trim()
+    if (!v) continue
+    any = true
+    const numeric = /^[\d.,%↑↓<>~+\-/\s①-⑳★☆()]+$/.test(v)
+    const shortLabel = [...v].length <= 10  // 기관명·시점·짧은 코드 등 범주 열
+    if (!numeric && !shortLabel) return false
+  }
+  return any
+}
+
 function generateTable(
   rows: string[][],
   theme: ResolvedTheme,
@@ -784,10 +912,13 @@ function generateTable(
 ): string {
   const rowCnt = rows.length
   const colCnt = Math.max(...rows.map(r => r.length), 1)
-  // A4 portrait: 폭 약 44000 HWPUnit 사용 가능 → colCnt로 균등 분배
-  const cellW = Math.floor(44000 / colCnt)
-  const cellH = 2066  // 기본 행 높이 (한컴 실측값 — 너무 낮으면 글자 잘림)
-  const tblW = cellW * colCnt
+  // 표 폭 = 본문 그림 폭(15cm≈42519)과 맞춰 안전하게 한 페이지 안에 들어오게(한글 기본 여백 기준 ~42500).
+  // 44000은 일부 환경에서 오른쪽으로 넘쳐 42000으로 보수적으로 설정.
+  const TABLE_W = 42000
+  const colWidths = computeColumnWidths(rows, colCnt, TABLE_W)
+  const colCenter = Array.from({ length: colCnt }, (_, c) => isColumnCenterable(rows, c))
+  const cellH = 2066  // 기본 행 높이 (한컴 실측값 — 너무 낮으면 글자 잘림). 내용이 길면 한컴이 자동 확장.
+  const tblW = colWidths.reduce((a, b) => a + b, 0)
   const tblH = cellH * rowCnt
 
   const tblId = nextTableId()
@@ -801,7 +932,8 @@ function generateTable(
     // 부족한 셀은 빈 문자열로 채워 colCnt 맞춤
     const cells = row.length < colCnt ? [...row, ...Array(colCnt - row.length).fill("")] : row
     const isHeaderRow = rowIdx === 0
-    const headerCharPr = isHeaderRow && useHeaderStyle ? CHAR_TABLE_HEADER : CHAR_NORMAL
+    // 표 안 글자는 9pt — 머리행은 머리 스타일(9pt 굵게), 본문행은 셀 본문(9pt)
+    const headerCharPr = isHeaderRow ? CHAR_TABLE_HEADER : CHAR_TABLE_CELL
     const tdElements = cells.map((cell, colIdx) => {
       // 셀 테두리: 깔보디노 스타일이면 위치별 borderFill, 아니면 기본(1)
       const cellBorderFill = kalbodino
@@ -820,14 +952,16 @@ function generateTable(
         p = generateImage(id, w, h, origW, origH, imgM[1].trim(), { treatAsChar: true })
       } else {
         const runs = generateRuns(cell, headerCharPr)
-        p = `<hp:p paraPrIDRef="${PARA_TABLE_CELL}" styleIDRef="0">${runs}</hp:p>`
+        // 머리행·짧은열(순번·중요도 등)은 가운데, 그 외 본문열은 왼쪽
+        const cellParaPr = (isHeaderRow || colCenter[colIdx]) ? PARA_TC_CENTER : PARA_TABLE_CELL
+        p = `<hp:p paraPrIDRef="${cellParaPr}" styleIDRef="0">${runs}</hp:p>`
       }
       // <hp:tc> 필수 속성 + subList + cellAddr + cellSpan + cellSz + cellMargin
       return `<hp:tc name="" header="${isHeaderRow ? 1 : 0}" hasMargin="0" protect="0" editable="1" dirty="0" borderFillIDRef="${cellBorderFill}">`
         + `<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">${p}</hp:subList>`
         + `<hp:cellAddr colAddr="${colIdx}" rowAddr="${rowIdx}"/>`
         + `<hp:cellSpan colSpan="1" rowSpan="1"/>`
-        + `<hp:cellSz width="${cellW}" height="${cellH}"/>`
+        + `<hp:cellSz width="${colWidths[colIdx]}" height="${cellH}"/>`
         + `<hp:cellMargin left="141" right="141" top="141" bottom="141"/>`
         + `</hp:tc>`
     }).join("")
@@ -838,7 +972,7 @@ function generateTable(
   const tblInner = `<hp:sz width="${tblW}" widthRelTo="ABSOLUTE" height="${tblH}" heightRelTo="ABSOLUTE" protect="0"/>`
     + `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="0" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>`
     + `<hp:outMargin left="0" right="0" top="0" bottom="0"/>`
-    + `<hp:inMargin left="510" right="510" top="141" bottom="141"/>`
+    + `<hp:inMargin left="250" right="250" top="141" bottom="141"/>`
     + trElements
 
   // 깔보디노는 외곽 테두리 없음(셀별 테두리로 표현) → 표 기본 borderFill=1(무테두리). 기본 표=2(실선)
@@ -846,7 +980,8 @@ function generateTable(
   const tbl = `<hp:tbl id="${tblId}" zOrder="0" numberingType="TABLE" textWrap="SQUARE" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="0" rowCnt="${rowCnt}" colCnt="${colCnt}" cellSpacing="0" borderFillIDRef="${tblBorderFill}" noShading="0">${tblInner}</hp:tbl>`
 
   // 테이블은 paragraph 안의 run → 가 아니라 별도 p로 감쌈 (block-level inline-anchored)
-  return `<hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0">${tbl}</hp:run></hp:p>`
+  // PARA_TABLE_BLOCK: 표 아래 여백으로 다음 내용과 분리(표+텍스트가 한 덩어리로 붙는 것 방지)
+  return `<hp:p paraPrIDRef="${PARA_TABLE_BLOCK}" styleIDRef="0"><hp:run charPrIDRef="0">${tbl}</hp:run></hp:p>`
 }
 
 // ─── 이미지 생성 ─────────────────────────────────────
@@ -942,7 +1077,9 @@ function generateImage(
       outMargin +
       comment +
     `</hp:pic>`
-  return `<hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0">${pic}</hp:run></hp:p>`
+  // 인라인(글자처럼) 그림은 가운데 정렬 단락으로 감싸 본문 폭 중앙에 배치
+  const imgParaPr = treatAsChar ? PARA_IMG_CENTER : 0
+  return `<hp:p paraPrIDRef="${imgParaPr}" styleIDRef="0"><hp:run charPrIDRef="0">${pic}</hp:run></hp:p>`
 }
 
 /** images 맵에서 src 해결 — 정확 일치 우선, basename 폴백. */
@@ -976,7 +1113,8 @@ function blocksToSectionXml(
   const orderedCounters: Record<number, number> = {}
   let prevWasOrdered = false
 
-  for (const block of blocks) {
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const block = blocks[bi]
     let xml = ""
 
     // 순서 있는 list_item이 아니면 카운터 전부 리셋 (연속되지 않은 목록은 다시 1부터)
@@ -989,14 +1127,28 @@ function blocksToSectionXml(
 
     switch (block.type) {
       case "heading": {
-        const pId = headingParaPrId(block.level || 1)
-        const cId = headingCharPrId(block.level || 1)
+        const lvl = block.level || 1
+        let pId = headingParaPrId(lvl)
+        // 바로 앞 블록도 제목이면(예: 과제 개요 H2 → 핵심 개발 시스템 H3) 위 여백을 좁혀 한 덩어리로 묶음
+        const prev = blocks[bi - 1]
+        if (prev && prev.type === "heading") {
+          if (lvl === 2) pId = PARA_H2_TIGHT
+          else if (lvl === 3) pId = PARA_H3_TIGHT
+          else if (lvl >= 4) pId = PARA_H4_TIGHT
+        }
+        const cId = headingCharPrId(lvl)
         xml = generateParagraph(block.text || "", pId, cId)
         break
       }
-      case "paragraph":
-        xml = generateParagraph(block.text || "")
+      case "paragraph": {
+        // 표/이미지 바로 앞의 "짧은 라벨"만 keepWithNext로 묶어 외톨이 방지(디자인 룰 ②③).
+        // 긴 해설 단락은 묶지 않는다 — 묶으면 표/이미지와 함께 다음 쪽으로 점프해 오히려 여백을 만든다.
+        const next = blocks[bi + 1]
+        const isLabel = (block.text || "").replace(/\*\*|`|__|\*/g, "").trim().length <= 40
+        const keep = !!next && (next.type === "table" || next.type === "image") && isLabel
+        xml = generateParagraph(block.text || "", keep ? PARA_NORMAL_KEEP : PARA_NORMAL)
         break
+      }
       case "code_block": {
         const codeLines = (block.text || "").split("\n")
         xml = codeLines.map(line => generateParagraph(line || " ", PARA_CODE)).join("\n  ")
@@ -1034,8 +1186,8 @@ function blocksToSectionXml(
         break
       }
       case "hr":
-        // 수평선 — 긴 대시로 대체
-        xml = `<hp:p paraPrIDRef="0" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t>────────────────────────────────────────</hp:t></hp:run></hp:p>`
+        // 수평선 — 하단 테두리(borderFill 3)를 가진 빈 단락 → 본문 폭 전체 선
+        xml = `<hp:p paraPrIDRef="${PARA_HR}" styleIDRef="0"><hp:run charPrIDRef="0"><hp:t></hp:t></hp:run></hp:p>`
         break
       case "table":
         if (block.rows) {
